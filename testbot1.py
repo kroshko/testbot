@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__) # содержит имя текущего 
 GET_WEIGHT, GET_START_DATE = range(2)
 
 # Токен бота из телеги
-TOKEN = "7082988240:AAEO9nitwQ1ejFXVb5SXMHgIgwpG-EWV0q4"
+TOKEN = "70829-------------------EWV0q4"
 
 # Словарь для хранения данных пользователей
 user_data = {}
