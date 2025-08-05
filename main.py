@@ -1,9 +1,4 @@
-!pip install python-telegram-bot==20.3 nest_asyncio
-
-import asyncio
-import nest_asyncio
-nest_asyncio.apply()
-
+import os
 import logging
 from datetime import datetime, timedelta
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
@@ -18,14 +13,15 @@ from telegram.ext import (
 
 # Настройка логирования
 logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
 # Константы
 GET_WEIGHT, GET_START_DATE = range(2)
-TOKEN = "7082988240:AAEO9nitwQ1ejFXVb5SXMHgIgwpG-EWV0q4"
+TOKEN = os.getenv('TELEGRAM_TOKEN')  # Токен через переменные окружения
 BOT_NAME = "VitaminBot"
 
 # Глобальные переменные для хранения данных пользователя
@@ -39,7 +35,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         "Привет! Я помогу рассчитать дозировку.\n"
         "Выберите действие:",
         reply_markup=ReplyKeyboardMarkup(
-            reply_keyboard, one_time_keyboard=True, input_field_placeholder="Выберите действие"
+            reply_keyboard, one_time_keyboard=True,
+            input_field_placeholder="Выберите действие"
         )
     )
     return GET_WEIGHT
@@ -67,11 +64,9 @@ async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обрабатывает ввод веса или выбор действия."""
     text = update.message.text
 
-    # Если пользователь выбрал "Скачать расписание"
     if text == "Скачать расписание":
         return await handle_download(update, context)
 
-    # Если пользователь выбрал "Получить расчет" или отправил вес
     if text == "Получить расчет":
         await update.message.reply_text(
             "Пожалуйста, введите ваш вес в кг:",
@@ -79,7 +74,6 @@ async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         )
         return GET_WEIGHT
 
-    # Обработка ввода веса
     try:
         weight = float(text)
         if weight <= 0:
@@ -87,7 +81,7 @@ async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
         user_data['weight'] = weight
 
-        # Автоматически определяем минимальную дозу по весу
+        # Автоматический расчет минимальной дозы
         if weight < 60:
             min_dose = 0.1
         elif 60 <= weight <= 80:
@@ -99,8 +93,8 @@ async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
         await update.message.reply_text(
             f"Ваш вес: {weight} кг.\n"
-            f"Минимальная дозировка для вашего веса составляет: {min_dose} мл.\n"
-            "Теперь введите дату начала курса в формате ДД.ММ.ГГГГ:",
+            f"Минимальная дозировка: {min_dose} мл.\n"
+            "Введите дату начала курса (ДД.ММ.ГГГГ):",
             reply_markup=ReplyKeyboardRemove()
         )
         return GET_START_DATE
@@ -109,115 +103,93 @@ async def get_weight(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         return GET_WEIGHT
 
 async def get_start_date(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Сохраняет дату начала курса и рассчитывает расписание."""
+    """Рассчитывает расписание и отправляет результат."""
     try:
         date_str = update.message.text
         start_date = datetime.strptime(date_str, "%d.%m.%Y").date()
         today = datetime.now().date()
 
         if start_date > today:
-            await update.message.reply_text("Дата начала курса не может быть в будущем. Пожалуйста, введите корректную дату.")
+            await update.message.reply_text("Дата начала не может быть в будущем!")
             return GET_START_DATE
 
-        user_data['start_date'] = start_date
         weight = user_data['weight']
         min_dose = user_data['min_dose']
 
-        # Определяем параметры курса в зависимости от веса
+        # Параметры курса
         if weight < 60:
-            max_dose = 4.0
-            step = 0.1
+            max_dose, step = 4.0, 0.1
         elif 60 <= weight <= 80:
-            max_dose = 7.0
-            step = 0.2
+            max_dose, step = 7.0, 0.2
         else:
-            max_dose = 8.0
-            step = 0.4
+            max_dose, step = 8.0, 0.4
 
-        # Рассчитываем количество дней для наращивания дозы
         days_to_max = int((max_dose - min_dose) / step)
-        total_days = days_to_max * 2  # столько же дней на уменьшение
-
-        # Проверяем, закончился ли курс
+        total_days = days_to_max * 2
         end_date = start_date + timedelta(days=total_days)
-        if today > end_date:
-            await update.message.reply_text(
-                f"Курс закончился {end_date.strftime('%d.%m.%Y')}. "
-                f"Начните новый курс с дозы: {min_dose} мл",
-                reply_markup=ReplyKeyboardRemove()
-            )
-            return ConversationHandler.END
 
+        # Генерация расписания
         schedule = []
         current_date = start_date
         current_dose = min_dose
 
-        # Фаза увеличения дозы
+        # Фаза увеличения
         for _ in range(days_to_max + 1):
             schedule.append((current_date, round(current_dose, 2)))
             current_date += timedelta(days=1)
             current_dose += step
 
-        # Корректируем последнюю дозу до точного максимума
-        current_dose = max_dose
-        schedule[-1] = (schedule[-1][0], max_dose)
+        schedule[-1] = (schedule[-1][0], max_dose)  # Коррекция максимума
 
-        # Фаза уменьшения дозы
+        # Фаза уменьшения
         for _ in range(days_to_max):
             current_dose -= step
             schedule.append((current_date, round(current_dose, 2)))
             current_date += timedelta(days=1)
 
-        user_data['schedule'] = schedule
+        # Текущая доза
+        current_dose_info = next(
+            ((date, dose) for date, dose in schedule if date <= today),
+            None
+        )
 
-        # Находим текущую дозу
-        current_dose_info = None
-        for date, dose in schedule:
-            if date <= today:
-                current_dose_info = (date, dose)
-            else:
-                break
-
-        # Формируем сообщение с результатами
+        # Формирование ответа
         if current_dose_info:
-            message = (
-                f"На {today.strftime('%d.%m.%Y')} ваша дозировка: {current_dose_info[1]} мл\n"
-                f"Дата начала курса: {start_date.strftime('%d.%m.%Y')}\n"
-                f"Минимальная доза: {min_dose} мл\n"
-                f"Максимальная доза: {max_dose} мл\n"
-                f"Шаг изменения: {step} мл\n"
-                f"Общая продолжительность курса: {total_days} дней\n"
-                f"Дата окончания курса: {end_date.strftime('%d.%m.%Y')}"
+            msg = (
+                f"На {today.strftime('%d.%m.%Y')} дозировка: {current_dose_info[1]} мл\n"
+                f"Курс: {start_date.strftime('%d.%m.%Y')} → {end_date.strftime('%d.%m.%Y')}\n"
+                f"Доза: {min_dose} → {max_dose} (шаг: {step} мл)"
             )
         else:
-            message = f"Курс начнется {start_date.strftime('%d.%m.%Y')}. Начните с дозы: {min_dose} мл"
+            msg = f"Курс начнется {start_date.strftime('%d.%m.%Y')}. Стартовая доза: {min_dose} мл"
 
-        await update.message.reply_text(message)
+        await update.message.reply_text(msg)
 
-        # Отправляем файл с расписанием сразу после расчета
+        # Сохранение и отправка файла
         filename = f"vitamin_schedule_{update.effective_user.id}.txt"
         with open(filename, "w") as f:
-            f.write("Дата\t\tДозировка (мл)\n")
+            f.write("Дата\t\tДоза (мл)\n")
             for date, dose in schedule:
                 f.write(f"{date.strftime('%d.%m.%Y')}\t{dose}\n")
 
         await update.message.reply_document(
             document=open(filename, "rb"),
-            caption="Полное расписание курса"
+            caption="Полное расписание"
         )
 
-        # Предлагаем возможность скачать расписание снова
-        reply_keyboard = [["Скачать расписание"]]
+        # Кнопка для повторного скачивания
         await update.message.reply_text(
-            "Вы можете скачать расписание снова:",
+            "Скачать расписание снова:",
             reply_markup=ReplyKeyboardMarkup(
-                reply_keyboard, one_time_keyboard=True, input_field_placeholder="Скачать расписание"
+                [["Скачать расписание"]], 
+                one_time_keyboard=True
             )
         )
 
         return ConversationHandler.END
-    except ValueError as e:
-        await update.message.reply_text("Пожалуйста, введите дату в формате ДД.ММ.ГГГГ.")
+
+    except ValueError:
+        await update.message.reply_text("Неверный формат даты! Используйте ДД.ММ.ГГГГ")
         return GET_START_DATE
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -230,39 +202,26 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Логирует ошибки."""
-    logger.error(msg="Exception while handling an update:", exc_info=context.error)
+    logger.error(f"Ошибка: {context.error}")
 
-def run_bot():
-    """Запуск бота с обработкой event loop для Colab"""
-    application = Application.builder().token(TOKEN).build()
-
+def main():
+    """Запуск бота."""
+    app = Application.builder().token(TOKEN).build()
+    
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
         states={
-            GET_WEIGHT: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, get_weight)
-            ],
-            GET_START_DATE: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, get_start_date)
-            ],
+            GET_WEIGHT: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_weight)],
+            GET_START_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, get_start_date)],
         },
-        fallbacks=[CommandHandler('cancel', cancel)],
+        fallbacks=[CommandHandler('cancel', cancel)]
     )
-
-    application.add_handler(conv_handler)
-    application.add_error_handler(error_handler)
-
-    logger.info(f"Бот {BOT_NAME} запущен")
-    print(f"Бот {BOT_NAME} работает! Напишите /start в Telegram")
-
-    # Особый запуск для Colab
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    try:
-        application.run_polling()
-    finally:
-        loop.close()
+    
+    app.add_handler(conv_handler)
+    app.add_error_handler(error_handler)
+    
+    logger.info("Бот запущен")
+    app.run_polling()
 
 if __name__ == '__main__':
-    run_bot()
+    main()
